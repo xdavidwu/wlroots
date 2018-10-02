@@ -6,6 +6,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <wayland-server.h>
+#include <wlr/backend/drm-atomic.h>
 #include <wlr/backend/drm.h>
 #include <wlr/backend/headless.h>
 #include <wlr/backend/interface.h>
@@ -156,19 +157,39 @@ static struct wlr_backend *attempt_backend_by_name(struct wl_display *display,
 #endif
 	} else if (strcmp(name, "headless") == 0) {
 		return attempt_headless_backend(display, create_renderer_func);
-	} else if (strcmp(name, "drm") == 0 || strcmp(name, "libinput") == 0) {
-		// DRM and libinput need a session
-		*session = wlr_session_create(display);
+	} else if (strcmp(name, "libinput") == 0) {
 		if (!*session) {
-			wlr_log(WLR_ERROR, "failed to start a session");
-			return NULL;
+			*session = wlr_session_create(display);
+			if (!*session) {
+				wlr_log(WLR_ERROR, "Failed to start a session");
+				return NULL;
+			}
 		}
 
-		if (strcmp(name, "libinput") == 0) {
-			return wlr_libinput_backend_create(display, *session);
-		} else {
-			return attempt_drm_backend(display, backend, *session, create_renderer_func);
+		return wlr_libinput_backend_create(display, *session);
+	} else if (strcmp(name, "drm") == 0) {
+		if (!*session) {
+			*session = wlr_session_create(display);
+			if (!*session) {
+				wlr_log(WLR_ERROR, "Failed to start a session");
+				return NULL;
+			}
 		}
+
+		return attempt_drm_backend(display, backend, *session, create_renderer_func);
+	} else if (strcmp(name, "drm-atomic") == 0) {
+		if (!*session) {
+			*session = wlr_session_create(display);
+			if (!*session) {
+				wlr_log(WLR_ERROR, "Failed to start a session");
+				return NULL;
+			}
+		}
+
+		int gpu_fd;
+		wlr_session_find_gpus(*session, 1, &gpu_fd);
+
+		return wlr_adrm_backend_create(display, *session, gpu_fd, create_renderer_func);
 	}
 
 	wlr_log(WLR_ERROR, "unrecognized backend '%s'", name);

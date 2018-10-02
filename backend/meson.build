@@ -8,6 +8,7 @@ backend_files = files(
 	'drm/properties.c',
 	'drm/renderer.c',
 	'drm/util.c',
+	'drm-atomic/backend.c',
 	'headless/backend.c',
 	'headless/input_device.c',
 	'headless/output.c',
