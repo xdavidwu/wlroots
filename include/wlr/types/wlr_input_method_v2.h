@@ -30,6 +30,8 @@ struct wlr_input_method_v2_state {
 	struct wlr_input_method_v2_delete_surrounding_text delete;
 };
 
+struct wlr_input_method_keyboard_grab_v2;
+
 struct wlr_input_method_v2 {
 	struct wl_resource *resource;
 
@@ -41,6 +43,8 @@ struct wlr_input_method_v2 {
 	bool client_active; // state known to the client
 	uint32_t current_serial; // received in last commit call
 
+	struct wlr_input_method_keyboard_grab_v2 *im_keyboard_grab;
+
 	struct wl_list link;
 
 	struct wl_listener seat_destroy;
@@ -49,6 +53,19 @@ struct wlr_input_method_v2 {
 		struct wl_signal commit; // (struct wlr_input_method_v2*)
 		struct wl_signal destroy; // (struct wlr_input_method_v2*)
 	} events;
+};
+
+struct wlr_input_method_keyboard_grab_v2 {
+	struct wl_resource *resource;
+	struct wlr_input_method_v2 *input_method;
+
+	struct wlr_seat_keyboard_grab *grab;
+	bool grabbed;
+
+	struct wl_listener keymap_listener;
+	struct wl_listener repeat_info_listener;
+
+	uint32_t serial;
 };
 
 struct wlr_input_method_manager_v2 {

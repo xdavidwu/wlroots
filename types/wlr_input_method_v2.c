@@ -3,15 +3,19 @@
 #endif
 #include <assert.h>
 #include <string.h>
+#include <sys/mman.h>
+#include <unistd.h>
 #include <wayland-util.h>
 #include <wlr/types/wlr_input_method_v2.h>
 #include <wlr/types/wlr_surface.h>
 #include <wlr/util/log.h>
 #include <xkbcommon/xkbcommon.h>
 #include "input-method-unstable-v2-protocol.h"
+#include "util/shm.h"
 #include "util/signal.h"
 
 static const struct zwp_input_method_v2_interface input_method_impl;
+static const struct zwp_input_method_keyboard_grab_v2_interface im_keyboard_grab_impl;
 
 static struct wlr_input_method_v2 *input_method_from_resource(
 		struct wl_resource *resource) {
@@ -20,10 +24,24 @@ static struct wlr_input_method_v2 *input_method_from_resource(
 	return wl_resource_get_user_data(resource);
 }
 
+static struct wlr_input_method_keyboard_grab_v2 *im_keyboard_grab_from_resource(
+		struct wl_resource *resource) {
+	assert(wl_resource_instance_of(resource,
+		&zwp_input_method_keyboard_grab_v2_interface,
+		&im_keyboard_grab_impl));
+	return wl_resource_get_user_data(resource);
+}
+
+static void im_keyboard_grab_destroy(
+		struct wlr_input_method_keyboard_grab_v2 *im_keyboard_grab);
+
 static void input_method_destroy(struct wlr_input_method_v2 *input_method) {
 	wlr_signal_emit_safe(&input_method->events.destroy, input_method);
 	wl_list_remove(wl_resource_get_link(input_method->resource));
 	wl_list_remove(&input_method->seat_destroy.link);
+	if (input_method->im_keyboard_grab != NULL) {
+		im_keyboard_grab_destroy(input_method->im_keyboard_grab);
+	}
 	free(input_method->pending.commit_text);
 	free(input_method->pending.preedit.text);
 	free(input_method->current.commit_text);
@@ -101,10 +119,188 @@ static void im_get_input_popup_surface(struct wl_client *client,
 	wlr_log(WLR_INFO, "Stub: zwp_input_method_v2::get_input_popup_surface");
 }
 
+static void im_keyboard_grab_destroy(
+		struct wlr_input_method_keyboard_grab_v2 *im_keyboard_grab) {
+	if (im_keyboard_grab->grabbed) {
+		im_keyboard_grab->grabbed = false;
+		wlr_seat_keyboard_end_grab(im_keyboard_grab->grab->seat);
+	}
+	im_keyboard_grab->input_method->im_keyboard_grab = NULL;
+	wl_list_remove(&im_keyboard_grab->keymap_listener.link);
+	wl_list_remove(&im_keyboard_grab->repeat_info_listener.link);
+	free(im_keyboard_grab->grab);
+	free(im_keyboard_grab);
+}
+
+static void im_keyboard_grab_resource_destroy(struct wl_resource *resource) {
+	struct wlr_input_method_keyboard_grab_v2 *im_keyboard_grab =
+		im_keyboard_grab_from_resource(resource);
+	if (!im_keyboard_grab) {
+		return;
+	}
+	im_keyboard_grab_destroy(im_keyboard_grab);
+}
+
+static void im_keyboard_grab_release(struct wl_client *client,
+		struct wl_resource *resource) {
+	wl_resource_destroy(resource);
+}
+
+static const struct zwp_input_method_keyboard_grab_v2_interface im_keyboard_grab_impl = {
+	.release = im_keyboard_grab_release,
+};
+
+static void im_keyboard_grab_enter(struct wlr_seat_keyboard_grab *grab,
+		struct wlr_surface *surface, uint32_t keycodes[],
+		size_t num_keycodes, struct wlr_keyboard_modifiers *modifiers) {
+	// Nothing to send for input-method keyboard grab
+}
+
+static void im_keyboard_grab_key(struct wlr_seat_keyboard_grab *grab,
+		uint32_t time, uint32_t key, uint32_t state) {
+	struct wlr_input_method_keyboard_grab_v2 *im_keyboard_grab = grab->data;
+	zwp_input_method_keyboard_grab_v2_send_key(im_keyboard_grab->resource,
+			im_keyboard_grab->serial++, time, key, state);
+}
+
+static void im_keyboard_grab_modifiers(struct wlr_seat_keyboard_grab *grab,
+		struct wlr_keyboard_modifiers *modifiers) {
+	struct wlr_input_method_keyboard_grab_v2 *im_keyboard_grab = grab->data;
+	zwp_input_method_keyboard_grab_v2_send_modifiers(
+			im_keyboard_grab->resource, im_keyboard_grab->serial++,
+			modifiers->depressed, modifiers->latched,
+			modifiers->locked, modifiers->group);
+}
+
+static void im_keyboard_grab_cancel(struct wlr_seat_keyboard_grab *grab) {
+	struct wlr_input_method_keyboard_grab_v2 *im_keyboard_grab = grab->data;
+	if (im_keyboard_grab->grabbed) {
+		im_keyboard_grab->grabbed = false;
+		struct wl_resource *resource = im_keyboard_grab->resource;
+		im_keyboard_grab_destroy(im_keyboard_grab);
+		wl_resource_set_user_data(resource, NULL);
+	}
+}
+
+static const struct wlr_keyboard_grab_interface keyboard_grab_impl = {
+	.enter = im_keyboard_grab_enter,
+	.key = im_keyboard_grab_key,
+	.modifiers = im_keyboard_grab_modifiers,
+	.cancel = im_keyboard_grab_cancel,
+};
+
+static bool im_keyboard_grab_send_keymap(
+		struct wlr_input_method_keyboard_grab_v2 *im_keyboard_grab,
+		struct wlr_keyboard *keyboard) {
+	int keymap_fd = allocate_shm_file(keyboard->keymap_size);
+	if (keymap_fd < 0) {
+		wlr_log(WLR_ERROR, "creating a keymap file for %zu bytes failed",
+				keyboard->keymap_size);
+		return false;
+	}
+
+	void *ptr = mmap(NULL, keyboard->keymap_size, PROT_READ | PROT_WRITE,
+		MAP_SHARED, keymap_fd, 0);
+	if (ptr == MAP_FAILED) {
+		wlr_log(WLR_ERROR, "failed to mmap() %zu bytes",
+				keyboard->keymap_size);
+		close(keymap_fd);
+		return false;
+	}
+
+	strcpy(ptr, keyboard->keymap_string);
+	munmap(ptr, keyboard->keymap_size);
+
+	zwp_input_method_keyboard_grab_v2_send_keymap(im_keyboard_grab->resource,
+		WL_KEYBOARD_KEYMAP_FORMAT_XKB_V1, keymap_fd,
+		keyboard->keymap_size);
+
+	close(keymap_fd);
+	return true;
+}
+
+static void im_keyboard_grab_send_repeat_info(
+		struct wlr_input_method_keyboard_grab_v2 *im_keyboard_grab,
+		struct wlr_keyboard *keyboard) {
+	zwp_input_method_keyboard_grab_v2_send_repeat_info(
+		im_keyboard_grab->resource, keyboard->repeat_info.rate,
+		keyboard->repeat_info.delay);
+}
+
+static void handle_keyboard_keymap(struct wl_listener *listener, void *data) {
+	struct wlr_input_method_keyboard_grab_v2 *im_keyboard_grab =
+		wl_container_of(listener, im_keyboard_grab, keymap_listener);
+	im_keyboard_grab_send_keymap(im_keyboard_grab, data);
+}
+
+static void handle_keyboard_repeat_info(struct wl_listener *listener,
+		void *data) {
+	struct wlr_input_method_keyboard_grab_v2 *im_keyboard_grab =
+		wl_container_of(listener, im_keyboard_grab, keymap_listener);
+	im_keyboard_grab_send_repeat_info(im_keyboard_grab, data);
+}
 
 static void im_grab_keyboard(struct wl_client *client,
 		struct wl_resource *resource, uint32_t keyboard) {
-	wlr_log(WLR_INFO, "Stub: zwp_input_method_v2::grab_keyboard");
+	struct wlr_input_method_v2 *input_method =
+		input_method_from_resource(resource);
+	if (!input_method) {
+		return;
+	}
+	if (input_method->im_keyboard_grab) {
+		// Already grabbed
+		return;
+	}
+	struct wlr_input_method_keyboard_grab_v2 *im_keyboard_grab =
+		calloc(1, sizeof(struct wlr_input_method_keyboard_grab_v2));
+	if (!im_keyboard_grab) {
+		wl_client_post_no_memory(client);
+		return;
+	}
+	struct wlr_seat_keyboard_grab *keyboard_grab = calloc(1,
+			sizeof(struct wlr_seat_keyboard_grab));
+	if (!keyboard_grab) {
+		wl_client_post_no_memory(client);
+		return;
+	}
+	struct wl_resource *im_keyboard_grab_resource = wl_resource_create(
+			client, &zwp_input_method_keyboard_grab_v2_interface,
+			wl_resource_get_version(resource), keyboard);
+	if (im_keyboard_grab_resource == NULL) {
+		free(im_keyboard_grab);
+		wl_client_post_no_memory(client);
+		return;
+	}
+	wl_resource_set_implementation(im_keyboard_grab_resource,
+			&im_keyboard_grab_impl, im_keyboard_grab,
+			im_keyboard_grab_resource_destroy);
+	keyboard_grab->interface = &keyboard_grab_impl;
+	keyboard_grab->data = im_keyboard_grab;
+	im_keyboard_grab->resource = im_keyboard_grab_resource;
+	im_keyboard_grab->grab = keyboard_grab;
+	im_keyboard_grab->input_method = input_method;
+	input_method->im_keyboard_grab = im_keyboard_grab;
+
+	if (!im_keyboard_grab_send_keymap(im_keyboard_grab,
+				input_method->seat->keyboard_state.keyboard)) {
+		// send initial keymap memory map failed
+		wl_client_post_no_memory(client);
+		wl_resource_destroy(im_keyboard_grab_resource);
+		return;
+	}
+	im_keyboard_grab_send_repeat_info(im_keyboard_grab,
+			input_method->seat->keyboard_state.keyboard);
+	wlr_seat_keyboard_start_grab(input_method->seat, keyboard_grab);
+	wlr_seat_keyboard_notify_modifiers(input_method->seat,
+			&input_method->seat->keyboard_state.keyboard->modifiers);
+	im_keyboard_grab->grabbed = true;
+
+	im_keyboard_grab->keymap_listener.notify = handle_keyboard_keymap;
+	wl_signal_add(&input_method->seat->keyboard_state.keyboard->events.keymap,
+			&im_keyboard_grab->keymap_listener);
+	im_keyboard_grab->repeat_info_listener.notify = handle_keyboard_repeat_info;
+	wl_signal_add(&input_method->seat->keyboard_state.keyboard->events.repeat_info,
+			&im_keyboard_grab->repeat_info_listener);
 }
 
 static const struct zwp_input_method_v2_interface input_method_impl = {
