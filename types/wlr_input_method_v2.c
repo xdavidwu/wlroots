@@ -40,7 +40,7 @@ static void input_method_destroy(struct wlr_input_method_v2 *input_method) {
 	wl_list_remove(wl_resource_get_link(input_method->resource));
 	wl_list_remove(&input_method->seat_destroy.link);
 	if (input_method->im_keyboard_grab != NULL) {
-		im_keyboard_grab_destroy(input_method->im_keyboard_grab);
+		wl_resource_destroy(input_method->im_keyboard_grab->resource);
 	}
 	free(input_method->pending.commit_text);
 	free(input_method->pending.preedit.text);
