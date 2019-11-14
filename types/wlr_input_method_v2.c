@@ -172,11 +172,11 @@ static void im_keyboard_grab_modifiers(struct wlr_seat_keyboard_grab *grab,
 
 static void im_keyboard_grab_cancel(struct wlr_seat_keyboard_grab *grab) {
 	struct wlr_input_method_keyboard_grab_v2 *im_keyboard_grab = grab->data;
+	wl_list_remove(&im_keyboard_grab->keymap_listener.link);
+	wl_list_remove(&im_keyboard_grab->repeat_info_listener.link);
 	if (im_keyboard_grab->grabbed) {
 		im_keyboard_grab->grabbed = false;
 		struct wl_resource *resource = im_keyboard_grab->resource;
-		wl_list_remove(&im_keyboard_grab->keymap_listener.link);
-		wl_list_remove(&im_keyboard_grab->repeat_info_listener.link);
 		im_keyboard_grab_destroy(im_keyboard_grab);
 		wl_resource_set_user_data(resource, NULL);
 	}
