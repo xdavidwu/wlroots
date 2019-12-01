@@ -158,6 +158,7 @@ static void virtual_keyboard_manager_create_virtual_keyboard(
 		return;
 	}
 	wlr_keyboard_init(keyboard, &keyboard_impl);
+	keyboard->virtual_keyboard = true;
 
 	struct wl_resource *keyboard_resource = wl_resource_create(client,
 		&zwp_virtual_keyboard_v1_interface, wl_resource_get_version(resource),

@@ -67,6 +67,8 @@ struct wlr_keyboard {
 		int32_t delay;
 	} repeat_info;
 
+	bool virtual_keyboard;
+
 	struct {
 		/**
 		 * The `key` event signals with a `wlr_event_keyboard_key` event that a
