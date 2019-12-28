@@ -150,7 +150,11 @@ clients = {
 	},
 	'input-method-keyboard-grab': {
 		'src': 'input-method-keyboard-grab.c',
-		'dep': [wayland_client, wlr_protos, xkbcommon],
+		'dep': xkbcommon,
+		'proto': [
+			'input-method-unstable-v2',
+			'text-input-unstable-v3',
+		],
 	},
 }
 
