@@ -151,7 +151,7 @@ static const struct zwp_input_method_keyboard_grab_v2_interface im_keyboard_grab
 static void im_keyboard_grab_enter(struct wlr_seat_keyboard_grab *grab,
 		struct wlr_surface *surface, uint32_t keycodes[],
 		size_t num_keycodes, struct wlr_keyboard_modifiers *modifiers) {
-	// Nothing to send for input-method keyboard grab
+	wlr_seat_keyboard_enter(grab->seat, surface, keycodes, num_keycodes, modifiers);
 }
 
 static void im_keyboard_grab_key(struct wlr_seat_keyboard_grab *grab,
